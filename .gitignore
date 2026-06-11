@@ -1,0 +1,6 @@
+outputs/
+data/
+.env
+__pycache__/
+*.pyc
+.cleaned.md
