@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+<meta name="session-token" content="<!--SESSION_TOKEN-->">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>引导基金 · 城市制度文本采集</title>
@@ -162,7 +163,8 @@ h1 em{font-style:italic;color:#6b6b65}
       <div class="form-row">
         <input class="input" id="cityInput" placeholder="城市名（如：某市）" autofocus>
         <input class="input" id="provInput" placeholder="省份（如：某省）">
-        <button class="btn btn-primary" id="collectBtn" onclick="startCollect()">
+        <label><input type="checkbox" id="llmOptIn"> 启用模型筛选（需 API 配置，可能产生费用）</label>
+<button class="btn btn-primary" id="collectBtn" onclick="startCollect()">
           开始采集
           <span class="btn-icon-wrap">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 17L17 7M17 7H7m10 0v10"/></svg>
@@ -199,7 +201,7 @@ h1 em{font-style:italic;color:#6b6b65}
     <div class="result-section reveal" id="resultSection">
       <div class="bezel-outer">
       <div class="bezel-inner" style="padding:.35rem">
-        <iframe id="resultFrame" title="制度文本缺口看板"></iframe>
+        <iframe sandbox="allow-scripts allow-popups allow-downloads" id="resultFrame" title="制度文本缺口看板"></iframe>
       </div>
       </div>
       <div class="result-actions">
@@ -219,7 +221,7 @@ var obs=new IntersectionObserver(function(entries){entries.forEach(function(e){i
 document.querySelectorAll(".reveal").forEach(function(el){obs.observe(el)});
 })();
 
-function addLog(msg,cls){cls=cls||"";var b=document.getElementById("logBox");b.innerHTML+='<div class="log-line '+cls+'">['+new Date().toLocaleTimeString()+'] '+msg+'</div>';b.scrollTop=b.scrollHeight}
+function addLog(msg,cls){var b=document.getElementById("logBox"),line=document.createElement("div");line.className="log-line "+(cls||"");line.textContent='['+new Date().toLocaleTimeString()+'] '+msg;b.appendChild(line);b.scrollTop=b.scrollHeight}
 function setStage(n,s){document.getElementById("stage-"+n).className="stage-pill "+s}
 function setProgress(pct,label){
 document.getElementById("progressBar").style.width=pct+"%";
@@ -243,7 +245,9 @@ document.getElementById("logBox").innerHTML="";
 ["search","screen","dedup","gap","done"].forEach(function(s){setStage(s,"")});
 setProgress(0,"初始化...");addLog(prov+" "+city,"ok");
 
-var es=new EventSource("/api/collect?city="+encodeURIComponent(city)+"&province="+encodeURIComponent(prov));
+var token=document.querySelector('meta[name="session-token"]').content;
+var llm=document.getElementById("llmOptIn").checked;
+var es=new EventSource("/api/collect?city="+encodeURIComponent(city)+"&province="+encodeURIComponent(prov)+"&token="+encodeURIComponent(token)+"&use_llm="+(llm?"1":"0"));
 es.addEventListener("progress",function(e){
 var d=JSON.parse(e.data);addLog(d.msg,d.level||"");
 if(d.stage)setStage(d.stage,"active");
@@ -271,10 +275,11 @@ dashboardHTML="";candidatesCSV="";document.getElementById("resultFrame").src="";
 fetch("/api/cached").then(function(r){return r.json()}).then(function(list){
 if(!list.length)return;
 document.getElementById("cachedSelect").classList.add("show");
-var h="";list.forEach(function(c){
-h+='<button class="btn-sm" data-file="'+c._file+'" onclick="loadCached(this)">'+c.province+' '+c.city+' <span style="color:#b0b0aa;font-size:.65rem">'+c.cached_at+'</span></button>';
+var container=document.getElementById("cachedBtns");list.forEach(function(c){
+var button=document.createElement("button");button.className="btn-sm";
+button.setAttribute("data-file",c._file);button.textContent=c.province+" "+c.city+" "+c.cached_at;
+button.onclick=function(){loadCached(button)};container.appendChild(button);
 });
-document.getElementById("cachedBtns").innerHTML=h;
 });
 
 function loadCached(el){
@@ -283,7 +288,7 @@ el.disabled=true;
 document.getElementById("progressSection").classList.add("show");
 document.getElementById("logBox").innerHTML="";
 addLog("加载缓存: "+filename,"ok");setProgress(10,"加载中...");
-fetch("/api/cached/"+filename).then(function(r){
+fetch("/api/cached/"+encodeURIComponent(filename)).then(function(r){
 if(!r.ok)throw new Error("HTTP "+r.status);
 return r.json();
 }).then(function(d){

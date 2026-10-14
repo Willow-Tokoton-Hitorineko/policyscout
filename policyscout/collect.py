@@ -91,6 +91,8 @@ def collect_city(province: str, city: str, use_llm: bool = True,
     Returns:
         候选 DataFrame（含 verdict 列）
     """
+    from .boundaries import validate_region
+    validate_region(city); validate_region(province)
     # 构建检索式：缺口定向 query 优先
     queries = []
     if gap_data:

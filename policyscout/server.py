@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import json, sys, os, signal
+import json, sys, secrets, re, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
@@ -18,7 +18,8 @@ import pandas as pd
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """多线程 HTTP 服务器 —— SSE 长连接不阻塞其他请求。"""
-    allow_reuse_address = True
+    # Windows SO_REUSEADDR can bind a second listener to an occupied port.
+    allow_reuse_address = False
     daemon_threads = True
 
 from .collect import collect_city as _collect_city, _extract_gap_years, _extract_gap_districts
@@ -37,27 +38,17 @@ _CACHE_DIR = Path(__file__).resolve().parents[1] / "outputs" / "cache"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _kill_existing(port: int):
-    """尝试杀掉占用端口的旧进程。"""
-    import subprocess
-    try:
-        if os.name == "nt":
-            out = subprocess.check_output(f'netstat -ano | findstr ":{port}"',
-                                          shell=True, text=True)
-            pids = set()
-            for line in out.strip().split('\n'):
-                parts = line.strip().split()
-                if len(parts) >= 5 and "LISTENING" in line:
-                    pids.add(parts[-1])
-            for pid in pids:
-                subprocess.run(f"taskkill /F /PID {pid}", shell=True,
-                               capture_output=True, timeout=3)
-        else:
-            out = subprocess.check_output(f"lsof -ti:{port}", shell=True, text=True)
-            for pid in out.strip().split('\n'):
-                os.kill(int(pid), signal.SIGKILL)
-    except Exception:
-        pass
+_SESSION_TOKEN = secrets.token_urlsafe(32)
+_COLLECT_LOCK = threading.Lock()
+
+
+def _cache_path(filename):
+    if not re.fullmatch(r"[0-9a-f]{8}_[\w ·（）()-]{1,80}\.json", filename):
+        raise ValueError("Invalid cache name")
+    path = (_CACHE_DIR / filename).resolve()
+    if not path.is_relative_to(_CACHE_DIR.resolve()):
+        raise ValueError("Cache path escapes cache directory")
+    return path
 
 
 def _list_cached() -> list[dict]:
@@ -65,7 +56,7 @@ def _list_cached() -> list[dict]:
     cached = []
     for f in sorted(_CACHE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
-            data = json.loads(f.read_text(encoding="utf-8"))
+            data = json.loads(_cache_path(f.name).read_text(encoding="utf-8"))
             data["_file"] = f.name
             cached.append(data)
         except Exception:
@@ -84,6 +75,8 @@ def _save_cache(city: str, province: str, html: str, csv_data: str, gap_summary:
         if isinstance(obj, (np.integer,)): return int(obj)
         if isinstance(obj, (np.floating,)): return float(obj)
         return obj
+    from .boundaries import validate_region
+    validate_region(city); validate_region(province)
     key = hashlib.md5(f"{province}_{city}".encode()).hexdigest()[:8]
     cache_file = _CACHE_DIR / f"{key}_{city}.json"
     cache_file.write_text(json.dumps(_safe({
@@ -99,23 +92,33 @@ class AgentHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _trusted_request(self):
+        port = self.server.server_address[1]
+        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin")
+        return (host in allowed and (origin is None or origin == f"http://{host}")
+                and self.headers.get("Sec-Fetch-Site", "") != "cross-site")
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        super().end_headers()
+
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "*")
-        self.end_headers()
+        self.send_error(403, "Cross-origin access is disabled")
 
     def do_GET(self):
+        if not self._trusted_request():
+            self.send_error(403, "Local same-origin access only"); return
         parsed = urlparse(self.path)
 
         if parsed.path in ("/", "/index.html"):
-            self._serve_html(INDEX_HTML)
+            self._serve_html(INDEX_HTML.replace("<!--SESSION_TOKEN-->", _SESSION_TOKEN))
 
         elif parsed.path == "/api/cached":
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             cached = _list_cached()
             # 返回摘要（不包含完整 HTML，太大）
@@ -126,12 +129,14 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         elif parsed.path.startswith("/api/cached/"):
             filename = unquote(parsed.path.split("/")[-1])
-            cache_file = _CACHE_DIR / filename
+            try:
+                cache_file = _cache_path(filename)
+            except ValueError:
+                self.send_error(404); return
             if cache_file.exists():
                 data = json.loads(cache_file.read_text(encoding="utf-8"))
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             else:
@@ -143,7 +148,19 @@ class AgentHandler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             city = qs.get("city", [""])[0]
             province = qs.get("province", [""])[0]
-            self._handle_collect_sse(city, province)
+            if not secrets.compare_digest(qs.get("token", [""])[0], _SESSION_TOKEN):
+                self.send_error(403, "Missing session token"); return
+            from .boundaries import validate_region
+            try:
+                validate_region(city); validate_region(province)
+            except ValueError:
+                self.send_error(400, "Invalid region"); return
+            if not _COLLECT_LOCK.acquire(blocking=False):
+                self.send_error(429, "Another collection is running"); return
+            try:
+                self._handle_collect_sse(city, province, use_llm=qs.get("use_llm", ["0"])[0] == "1")
+            finally:
+                _COLLECT_LOCK.release()
 
         else:
             self.send_response(404)
@@ -153,7 +170,6 @@ class AgentHandler(BaseHTTPRequestHandler):
     def _serve_html(self, html: str):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(html.encode("utf-8"))
 
@@ -163,12 +179,11 @@ class AgentHandler(BaseHTTPRequestHandler):
         self.wfile.write(msg.encode("utf-8"))
         self.wfile.flush()
 
-    def _handle_collect_sse(self, city: str, province: str):
+    def _handle_collect_sse(self, city: str, province: str, use_llm: bool = False):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         try:
@@ -180,7 +195,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             if gap_years or gap_dists:
                 self._sse("progress", {"msg": f"缺口: 年份{len(gap_years)}处, 区县{len(gap_dists)}处 — 定向检索", "level": "warn", "pct": 5})
             self._sse("progress", {"msg": "搜狗微信多源搜索...", "level": "info", "stage": "search", "pct": 8, "label": "搜索中"})
-            df = _collect_city(province, city, use_llm=True, max_queries=3, gap_data=gap)
+            df = _collect_city(province, city, use_llm=use_llm, max_queries=3, gap_data=gap)
             n_total = len(df)
             self._sse("progress", {"msg": f"搜索完成: {n_total} 条", "level": "ok", "pct": 30, "stage_done": "search"})
 
@@ -224,7 +239,8 @@ class AgentHandler(BaseHTTPRequestHandler):
 
 
 def start_server(host: str = HOST, port: int = PORT):
-    _kill_existing(port)
+    if host not in ("127.0.0.1", "localhost"):
+        raise ValueError("This service must bind to loopback")
     server = ThreadingHTTPServer((host, port), AgentHandler)
 
     url = f"http://{host}:{port}"

@@ -8,6 +8,9 @@ from pathlib import Path
 PKG_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PKG_ROOT.parent
 
+from dotenv import load_dotenv
+load_dotenv(PKG_ROOT / ".env", override=False)
+
 # ── 输出 ──
 OUTPUTS_DIR = PKG_ROOT / "outputs"
 CANDIDATES_DIR = OUTPUTS_DIR / "candidates"

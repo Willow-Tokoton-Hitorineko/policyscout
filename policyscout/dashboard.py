@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from html import escape
+from urllib.parse import urlsplit
 from datetime import datetime as dt
 from pathlib import Path
 from typing import Any
@@ -41,7 +43,18 @@ def build_dashboard_html(gap_data: dict, candidates: list[dict] = None, candidat
         return obj
     payload = _make_serializable(payload)
     payload_json = json.dumps(payload, ensure_ascii=False)
-    s = payload["summary"]
+    for char, encoded in (("<", r"\u003c"), (">", r"\u003e"), ("&", r"\u0026"), ("\u2028", r"\u2028"), ("\u2029", r"\u2029")):
+        payload_json = payload_json.replace(char, encoded)
+    def safe_display(obj, key=""):
+        if isinstance(obj, dict):
+            return {k: safe_display(v, k) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [safe_display(v, key) for v in obj]
+        if isinstance(obj, str):
+            return escape(obj, quote=True)
+        return obj
+    gap_data = safe_display(gap_data)
+    s = safe_display(payload["summary"])
     city_n = s["city_level_n"]
     dist_n = s["district_n"]
     n_cand = len(candidates)
@@ -142,6 +155,14 @@ a{{color:var(--blue);text-decoration:none;font-weight:500}}a:hover{{color:#0058b
 <script>
 (function(){{
 var P={payload_json};
+function safeDisplay(v,k){{
+if(Array.isArray(v))return v.map(function(x){{return safeDisplay(x,k)}});
+if(v&&typeof v==='object'){{Object.keys(v).forEach(function(key){{v[key]=safeDisplay(v[key],key)}});return v}}
+if(typeof v!=='string')return v;
+if(k==='url'||k==='pkulaw_link'||k==='flk_link'){{try{{var u=new URL(v);if(u.protocol!=='http:'&&u.protocol!=='https:')return '#'}}catch(e){{return '#'}}}}
+return v.replace(/[&<>"']/g,function(c){{return {{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]}});
+}}
+P=safeDisplay(P);
 document.getElementById("tabBar").addEventListener("click",function(e){{
 var b=e.target.closest(".tab-btn");if(!b)return;
 document.querySelectorAll(".tab-btn").forEach(function(t){{t.classList.remove("active")}});
@@ -254,7 +275,7 @@ else{{
 h+='<div class="panel"><h2>采集候选 ('+(P.candidate_source||"")+')</h2>';
 h+='<div class="alert alert-info">搜狗微信搜索结果（预筛选后）。需人工下载原文放入 intake 目录，再运行 V5 结构化。</div>';
 h+='<div class="legend"><div class="legend-item"><span class="tag tag-green">PASS</span></div><div class="legend-item"><span class="tag tag-blue">LLM_PASS</span></div><div class="legend-item"><span class="tag tag-red">REJECT</span></div></div>';
-h+='<div class="tbl-wrap"><table><thead><tr><th>#</th><th>标题</th><th>判</th><th>kw</th><th>??</th><th>??</th><th>??</th></tr></thead><tbody>';
+h+='<div class="tbl-wrap"><table><thead><tr><th>#</th><th>标题</th><th>筛选</th><th>关键词分</th><th>微信来源</th><th>法宝</th><th>法规库</th></tr></thead><tbody>';
 cs.forEach(function(c,i){{
 var vc=c.verdict==="PASS"?"tag-green":(c.verdict==="LLM_PASS"?"tag-blue":"tag-red");
 h+='<tr><td>'+(i+1)+'</td><td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+c.title.replace(/"/g,"&quot;")+'">'+c.title.substring(0,80)+'</td><td><span class="tag '+vc+'">'+c.verdict+'</span></td><td>'+c.kw_score+'</td>';

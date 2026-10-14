@@ -202,3 +202,16 @@ python -m policyscout.collect 某市 某省 --no-llm   # 仅规则快判，不�
 - MIT → [开源许可证](LICENSE)
 
 <p align="center"><sub>🐱 <a href="https://github.com/Willow-Tokoton-Hitorineko/Willow-Tokoton-Hitorineko">戆北在coding の猫窝</a> · 欢迎 Issue</sub></p>
+
+
+## 本地服务安全与验证（2026-10-14）
+
+服务仅绑定回环地址，拒绝跨站 Origin/Host，缓存读取限制在命名合规的缓存目录内。采集需当前页面会话令牌，最多一个任务同时运行；网页模型筛选默认关闭，须显式勾选。规则搜索仍会访问外部搜索站点。结果 iframe 隔离，文本和链接按展示边界转义，链接仅允许 HTTP(S)。端口被占用时启动报错，改用 `--port`，不会结束其他进程。
+
+根目录 `.env` 由 python-dotenv 加载，已有进程环境变量优先。请勿提交真实 `.env`。离线回归测试不请求模型或搜索服务：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+这是本机单用户原型，不提供公网身份认证和部署能力；模型费用没有全局预算上限。
